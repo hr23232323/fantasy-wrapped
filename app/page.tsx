@@ -4,11 +4,15 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useEffect } from "react";
 import { PositionBadge } from "./components/PositionBadge";
 import { RecordsTab } from "./components/RecordsTab";
+import { TrophyRoom } from "./components/TrophyRoom";
+import { ToiletBowl } from "./components/ToiletBowl";
+import { TradesSlider } from "./components/TradesSlider";
 import {
   fetchPlayers,
   fetchLeagueAndRosters,
   fetchAllTrades,
   fetchAllMatchups,
+  fetchAllPlayoffBrackets,
   type Player,
   type LeagueUser,
   type Roster,
@@ -16,6 +20,7 @@ import {
   type Trade,
   type Transaction,
   type Matchup,
+  type BracketMatchup,
 } from "./services/dataFetching";
 
 export interface TeamWithName extends Roster {
@@ -42,6 +47,7 @@ export default function Home() {
   const [trades, setTrades] = useState<Trade[]>([]);
   const [openRosters, setOpenRosters] = useState<Set<number>>(new Set());
   const [matchups, setMatchups] = useState<Matchup[]>([]);
+  const [playoffBrackets, setPlayoffBrackets] = useState<Record<string, { winners: BracketMatchup[]; losers: BracketMatchup[] }>>({});
 
   useEffect(() => {
     if (urlLeagueId) {
@@ -85,15 +91,17 @@ export default function Home() {
       setRosters(enrichedRosters);
 
       // Fetch all data in parallel
-      const [playersData, tradesData, matchupsData] = await Promise.all([
+      const [playersData, tradesData, matchupsData, bracketsData] = await Promise.all([
         fetchPlayers(),
         fetchAllTrades(id),
         fetchAllMatchups(id, allEnrichedRosters),
+        fetchAllPlayoffBrackets(id),
       ]);
 
       setPlayers(playersData);
       setTrades(tradesData);
       setMatchups(matchupsData);
+      setPlayoffBrackets(bracketsData);
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
@@ -271,59 +279,162 @@ export default function Home() {
                 <RecordsTab rosters={rosters} matchups={matchups} trades={trades} league={league} />
               )}
 
-              {currentTab === "trophies" && (
-                <div className="space-y-6 max-w-5xl">
-                  <h2 className="text-2xl font-bold">All-Time Single Week Scoring Records</h2>
+              {currentTab === "trophies" && (() => {
+                // Extract playoff finalists from bracket data
+                const finalistsByYear = new Map<string, { first?: number; second?: number; third?: number }>();
 
-                  {/* Table */}
-                  {matchups.length > 0 && (
-                    <div className="border border-zinc-700 rounded-lg overflow-hidden">
-                      {/* Header Row */}
-                      <div className="grid grid-cols-12 gap-4 bg-zinc-800 px-6 py-4 border-b border-zinc-700">
-                        <div className="col-span-1"></div>
-                        <div className="col-span-5 text-white font-semibold">Manager</div>
-                        <div className="col-span-3 text-white font-semibold">Week</div>
-                        <div className="col-span-3 text-white font-semibold text-right">Total Points</div>
-                      </div>
+                Object.entries(playoffBrackets).forEach(([year, brackets]) => {
+                  const finalists: { first?: number; second?: number; third?: number } = {};
 
-                      {/* Data Rows */}
-                      {matchups
-                        .sort((a, b) => b.points - a.points)
-                        .slice(0, 10)
-                        .map((matchup, idx) => {
-                          const team = rosters.find(r => r.roster_id === matchup.roster_id);
-                          const year = matchup.year || "Unknown";
-                          return team ? (
-                            <div key={`${matchup.year}-${matchup.week}-${matchup.roster_id}`} className="grid grid-cols-12 gap-4 px-6 py-4 border-b border-zinc-800/50 hover:bg-zinc-800/30 transition-colors items-center">
-                              <div className="col-span-1 text-white font-bold">{idx + 1}</div>
-                              <div className="col-span-5 flex items-center gap-3">
-                                {team.avatar && <img src={team.avatar} alt={team.teamName} className="w-8 h-8 rounded-full flex-shrink-0" />}
-                                <div className="min-w-0">
-                                  <p className="text-white font-semibold truncate">{team.teamName}</p>
-                                  <p className="text-zinc-400 text-xs truncate">{team.ownerName}</p>
-                                </div>
-                              </div>
-                              <div className="col-span-3 text-zinc-300">{year} Week {matchup.week}</div>
-                              <div className="col-span-3 text-white font-bold text-right text-lg">{matchup.points.toFixed(2)}</div>
-                            </div>
-                          ) : null;
-                        })}
+                  if (brackets.winners && brackets.winners.length > 0) {
+                    // Find finals match - where both t1_from and t2_from are winners (both advanced from winners bracket)
+                    const finals = brackets.winners.find((m: BracketMatchup) => {
+                      const t1From = (m as any).t1_from;
+                      const t2From = (m as any).t2_from;
+                      return t1From && t1From.w && t2From && t2From.w && m.w && m.l;
+                    });
+
+                    if (finals) {
+                      finalists.first = finals.w; // Winner of finals
+                      finalists.second = finals.l; // Loser of finals
+                    }
+
+                    // Find third place - where both t1_from and t2_from are losers (from losers bracket)
+                    // If multiple, pick the one with MAX match ID (highest seed matchup like 5/6 vs 3/4)
+                    const thirdPlaceCandidates = brackets.winners.filter((m: BracketMatchup) => {
+                      const t1From = (m as any).t1_from;
+                      const t2From = (m as any).t2_from;
+                      return t1From && t1From.l && t2From && t2From.l && m.w;
+                    });
+
+                    if (thirdPlaceCandidates.length > 0) {
+                      // Get the one with highest match ID
+                      const thirdPlaceMatch = thirdPlaceCandidates.reduce((max, current) =>
+                        current.m > max.m ? current : max
+                      );
+                      finalists.third = thirdPlaceMatch.w;
+                    }
+                  }
+
+                  if (Object.keys(finalists).length > 0) {
+                    finalistsByYear.set(year, finalists);
+                  }
+                });
+
+                // Build champion list with teams
+                const champions = Array.from(finalistsByYear.entries())
+                  .sort((a, b) => parseInt(b[0]) - parseInt(a[0]))
+                  .map(([year, finalists]) => {
+                    const placements: Array<{ place: 1 | 2 | 3; team: TeamWithName | undefined }> = [];
+
+                    if (finalists.first) {
+                      const team = rosters.find(r => r.roster_id === finalists.first);
+                      placements.push({ place: 1, team });
+                    }
+                    if (finalists.second) {
+                      const team = rosters.find(r => r.roster_id === finalists.second);
+                      placements.push({ place: 2, team });
+                    }
+                    if (finalists.third) {
+                      const team = rosters.find(r => r.roster_id === finalists.third);
+                      placements.push({ place: 3, team });
+                    }
+
+                    return { year, placements };
+                  });
+
+                return <TrophyRoom champions={champions} />;
+              })()}
+
+              {currentTab === "toilet" && (() => {
+                // Extract toilet bowl losers from losers bracket
+                const toiletBowlByYear = new Map<string, { first?: number; second?: number; third?: number }>();
+
+                Object.entries(playoffBrackets).forEach(([year, brackets]) => {
+                  const finalists: { first?: number; second?: number; third?: number } = {};
+
+                  if (brackets.losers && brackets.losers.length > 0) {
+                    // Find final match in losers bracket - where both t1_from and t2_from are losers (both advanced from losers bracket)
+                    const final = brackets.losers.find((m: BracketMatchup) => {
+                      const t1From = (m as any).t1_from;
+                      const t2From = (m as any).t2_from;
+                      return t1From && t1From.l && t2From && t2From.l && m.w && m.l;
+                    });
+
+                    if (final) {
+                      finalists.first = final.l; // Loser of losers final (Most losing / worst team)
+                      finalists.second = final.w; // Winner of losers final (Second worst)
+                    }
+
+                    // Find third worst - where both t1_from and t2_from are losers, pick MAX match ID (highest seed losers match like 5/6 vs 3/4)
+                    const thirdWorstCandidates = brackets.losers.filter((m: BracketMatchup) => {
+                      const t1From = (m as any).t1_from;
+                      const t2From = (m as any).t2_from;
+                      return t1From && t1From.l && t2From && t2From.l && m.w;
+                    });
+
+                    if (thirdWorstCandidates.length > 0) {
+                      // Get the one with highest match ID (same as trophy logic)
+                      const thirdWorstMatch = thirdWorstCandidates.reduce((max, current) =>
+                        current.m > max.m ? current : max
+                      );
+                      finalists.third = thirdWorstMatch.l; // Loser of that match is third worst
+                    }
+                  }
+
+                  if (Object.keys(finalists).length > 0) {
+                    toiletBowlByYear.set(year, finalists);
+                  }
+                });
+
+                // Build toilet bowl list with teams
+                const toiletBowlSeasons = Array.from(toiletBowlByYear.entries())
+                  .sort((a, b) => parseInt(b[0]) - parseInt(a[0]))
+                  .map(([year, finalists]) => {
+                    const placements: Array<{ place: 1 | 2 | 3; team: TeamWithName | undefined }> = [];
+
+                    if (finalists.first) {
+                      const team = rosters.find(r => r.roster_id === finalists.first);
+                      placements.push({ place: 1, team });
+                    }
+                    if (finalists.second) {
+                      const team = rosters.find(r => r.roster_id === finalists.second);
+                      placements.push({ place: 2, team });
+                    }
+                    if (finalists.third) {
+                      const team = rosters.find(r => r.roster_id === finalists.third);
+                      placements.push({ place: 3, team });
+                    }
+
+                    return { year, placements };
+                  });
+
+                return (
+                  <div className="space-y-12">
+                    <div>
+                      <h2 className="text-3xl font-bold text-red-400 mb-2">🚽 Toilet Bowl</h2>
+                      <p className="text-zinc-400">The teams that made it to the losers bracket finals</p>
                     </div>
-                  )}
-                </div>
-              )}
-
-              {currentTab === "toilet" && (
-                <div className="space-y-6">
-                  <h2 className="text-2xl font-bold">Toilet Bowl</h2>
-                  <p className="text-zinc-400">Coming soon - Last place finishes and losing streaks</p>
-                </div>
-              )}
+                    {toiletBowlSeasons.map((season) => {
+                      const toiletData = {
+                        year: season.year,
+                        first: season.placements.find(p => p.place === 1)?.team,
+                        second: season.placements.find(p => p.place === 2)?.team,
+                        third: season.placements.find(p => p.place === 3)?.team,
+                      };
+                      return <ToiletBowl key={season.year} data={toiletData} />;
+                    })}
+                  </div>
+                );
+              })()}
 
               {currentTab === "trades" && (
-                <div className="space-y-6">
-                  <h2 className="text-2xl font-bold">The Trades</h2>
-                  <p className="text-zinc-400">Total trades: {trades.length}</p>
+                <div className="space-y-8">
+                  <div>
+                    <h2 className="text-3xl font-bold mb-2">🤝 The Trades</h2>
+                    <p className="text-zinc-400">Total trades: {trades.length}</p>
+                  </div>
+                  <TradesSlider trades={trades} rosters={rosters} players={players} />
                 </div>
               )}
 

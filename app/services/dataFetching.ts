@@ -200,3 +200,57 @@ export async function fetchAllMatchups(leagueId: string, rosters: Roster[]): Pro
 
   return allMatchups;
 }
+
+// Bracket matchup structure
+export interface BracketMatchup {
+  r: number; // round number
+  m: number; // match id
+  w?: number; // winner roster_id
+  l?: number; // loser roster_id
+  t1?: number | { w?: number; l?: number }; // team 1 or bracket reference
+  t2?: number | { w?: number; l?: number }; // team 2 or bracket reference
+}
+
+// Fetch playoff brackets across all seasons
+export async function fetchAllPlayoffBrackets(leagueId: string): Promise<Record<string, { winners: BracketMatchup[]; losers: BracketMatchup[] }>> {
+  const allBrackets: Record<string, { winners: BracketMatchup[]; losers: BracketMatchup[] }> = {};
+  let currentLeagueId: string | null = leagueId;
+
+  while (currentLeagueId) {
+    let leagueYear = "";
+    let nextLeagueId: string | null = null;
+
+    // Get league season year and previous league id
+    try {
+      const leagueRes = await fetch(`https://api.sleeper.app/v1/league/${currentLeagueId}`);
+      if (leagueRes.ok) {
+        const leagueData: League = await leagueRes.json();
+        leagueYear = leagueData.season || "";
+        nextLeagueId = leagueData.previous_league_id || null;
+      } else {
+        break;
+      }
+    } catch {
+      break;
+    }
+
+    // Fetch winners and losers brackets in parallel
+    try {
+      const [winnersRes, losersRes] = await Promise.all([
+        fetch(`https://api.sleeper.app/v1/league/${currentLeagueId}/winners_bracket`),
+        fetch(`https://api.sleeper.app/v1/league/${currentLeagueId}/losers_bracket`),
+      ]);
+
+      const winners = winnersRes.ok ? await winnersRes.json() : [];
+      const losers = losersRes.ok ? await losersRes.json() : [];
+
+      allBrackets[leagueYear] = { winners, losers };
+    } catch {
+      // Bracket data might not exist for all seasons
+    }
+
+    currentLeagueId = nextLeagueId;
+  }
+
+  return allBrackets;
+}
